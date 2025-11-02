@@ -211,7 +211,7 @@ def analises(year_range):
         pl_anterior = pl_atual
         estoque_anterior = estoque_atual
         receb_anterior = receb_atual
-        passivo_fornecedores_anterior = passivo_fornecedores_atua
+        passivo_fornecedores_anterior = passivo_fornecedores_atual
         return pd.DataFrame(results).set_index('Ano')
     
 
