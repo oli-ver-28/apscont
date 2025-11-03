@@ -22,9 +22,9 @@ def relatorio_cias_abertas(ano, cod, tipo_periodo, tipo_demonstrativo):
     df = read_csv_from_zip(url, arquivo) 
     return df
 
-# >>>>>>>>>>> AQUI: agora padrão é RUMO (CD_CVM = '017450')
+# >>>>>>> AQUI: só trocamos o código CVM padrão para Rumo
 def carregar_data(ano, cod, tipo_periodo, tipo_demonstrativo, colunas_para_remover,
-                  filtro_cvm='017450'):
+filtro_cvm='017450'):
     url =f'http://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/{tipo_periodo}/DADOS/{tipo_periodo.lower()}_cia_aberta_{ano}.zip'
     arquivo = f'{tipo_periodo.lower()}_cia_aberta_{cod}_{tipo_demonstrativo}_{ano}.csv'
     df = read_csv_from_zip(url, arquivo)
@@ -37,8 +37,12 @@ def carregar_data(ano, cod, tipo_periodo, tipo_demonstrativo, colunas_para_remov
     return df
 
 def calculo(df_ativos, df_passivos, df_receitas, df_despesas,
-            df_depreciacao,pl_anterior,estoque_anterior,receb_anterior,passivo_fornecedores_anterior):
+df_depreciacao,pl_anterior,estoque_anterior,receb_anterior,passivo_fornecedores_anterior):
     metrics = {}
+    
+    # Definir caixa_equivalentes antes de usar
+    caixa_equivalentes = df_ativos[df_ativos['DS_CONTA'].str.contains('Caixa e Equivalentes de Caixa')]['VL_CONTA'].sum()
+    
     pl_atual = df_passivos[df_passivos['DS_CONTA'].str.contains('Patrimônio LíquidoConsolidado')]['VL_CONTA'].sum()
     if pl_anterior is not None:
         pl_medio = (pl_anterior + pl_atual) / 2
@@ -57,7 +61,13 @@ def calculo(df_ativos, df_passivos, df_receitas, df_despesas,
     else:
         receb_medio = receb_atual
 
-    passivo_fornecedores_atual = df_passivos.loc[df_passivos.loc[df_passivos['CD_CONTA'] == '2.01.02'].first_valid_index(), 'VL_CONTA']
+    # buscar passivo fornecedores com verificação para evitar KeyError se não houver linha
+    mask_fornecedores = df_passivos['CD_CONTA'] == '2.01.02'
+    if mask_fornecedores.any():
+        passivo_fornecedores_atual = df_passivos.loc[mask_fornecedores, 'VL_CONTA'].iloc[0]
+    else:
+        passivo_fornecedores_atual = 0.0
+
     if passivo_fornecedores_anterior is not None:
         passivo_fornecedores_medio = (passivo_fornecedores_anterior + passivo_fornecedores_atual) / 2
     else:
@@ -66,49 +76,55 @@ def calculo(df_ativos, df_passivos, df_receitas, df_despesas,
     passivos_circulantes = df_passivos[df_passivos['DS_CONTA'].str.contains('PassivoCirculante')]['VL_CONTA'].sum()
     if passivos_circulantes != 0:
          metrics['liquidez_corrente'] = round(df_ativos[df_ativos['DS_CONTA'].str.contains('Ativo Circulante')]['VL_CONTA'].sum() / passivos_circulantes, 1)
-         caixa_equivalentes = df_ativos[df_ativos['DS_CONTA'].str.contains('Caixa e Equivalentes de Caixa')]['VL_CONTA'].sum()
          metrics['liquidez_imediata'] = round(caixa_equivalentes / passivos_circulantes, 1)
          estoques = df_ativos[df_ativos['DS_CONTA'].str.contains('Estoques')]['VL_CONTA'].sum()
          metrics['liquidez_seca'] = round((df_ativos[df_ativos['DS_CONTA'].str.contains('AtivoCirculante')]['VL_CONTA'].sum() - estoques) / passivos_circulantes, 1)
     else:
         metrics['liquidez_corrente'] = metrics['liquidez_imediata'] = metrics['liquidez_seca'] = float('inf')
 
-    # EBIT e EBITDA
+    # EBIT and EBITDA
     df_receitas['VL_CONTA'] = pd.to_numeric(df_receitas['VL_CONTA'], errors='coerce')
 
     total_receitas = df_receitas.loc[df_receitas['DS_CONTA'].str.contains('Receita de Venda de Bens e/ou Serviços', case=False, na=False), 'VL_CONTA'].sum()
     total_despesas = df_receitas.loc[df_receitas['DS_CONTA'].str.contains('Custo dos Bens e/ou Serviços Vendidos|Despesas/Receitas Operacionais', case=False, na=False),'VL_CONTA'].sum()
     ebit = total_receitas + total_despesas
     metrics['EBIT'] = round(ebit, 2)
-
-    df_depreciacao_amortizacao = df_receitas
+    df_depreciacao_amortizacao=df_receitas
     df_depreciacao_amortizacao['VL_CONTA'] = pd.to_numeric(df_depreciacao_amortizacao['VL_CONTA'], errors='coerce')
     regex_depreciacao = r'Deprecia[cç][ãa]o'
-    depreciacao = df_depreciacao_amortizacao.loc[df_depreciacao_amortizacao['DS_CONTA'].str.contains(regex_depreciacao, case=False, regex=True, na=False), 'VL_CONTA'].sum()
+    depreciacao =df_depreciacao_amortizacao.loc[df_depreciacao_amortizacao['DS_CONTA'].str.contains(regex_depreciacao, case=False, regex=True, na=False), 'VL_CONTA'].sum()
     metrics['EBITDA'] = round(ebit - depreciacao, 2)
 
+    # Patrimonio Liquido, Divida Liquida e passivo total
     patrimonio_liquido = df_passivos[df_passivos['DS_CONTA'].str.contains('PatrimônioLíquido Consolidado')]['VL_CONTA'].sum()
     total_passivo = df_passivos.loc[df_passivos['DS_CONTA'].str.contains('Passivo Circulante|Passivo Não Circulante',case=False, regex=True),'VL_CONTA'].sum()
-    divida_liquida = df_passivos.loc[df_passivos['DS_CONTA'].str.contains('Empréstimos e Financiamentos', case=False,regex=True),'VL_CONTA'].sum()
+    divida_liquida=df_passivos.loc[df_passivos['DS_CONTA'].str.contains('Empréstimos e Financiamentos', case=False,regex=True),'VL_CONTA'].sum()
 
-    comp_capital_proprio = patrimonio_liquido/df_passivos[df_passivos['DS_CONTA'].str.contains('PassivoTotal')]['VL_CONTA'].sum()
-    metrics['Composição_do_capital_proprio'] = round(comp_capital_proprio*100, 0)
-    comp_capital_de_terceiros = total_passivo/df_passivos[df_passivos['DS_CONTA'].str.contains('PassivoTotal')]['VL_CONTA'].sum()
-    metrics['Composição_do_capital_de_terceiros'] = round(comp_capital_de_terceiros*100,0)
+    # Capital Proprio e de Terceiros
+    denom_passivo_total = df_passivos[df_passivos['DS_CONTA'].str.contains('PassivoTotal')]['VL_CONTA'].sum()
+    comp_capital_proprio = patrimonio_liquido/denom_passivo_total if denom_passivo_total != 0 else float('nan')
+    metrics['Composição_do_capital_proprio'] = round(comp_capital_proprio*100, 0) if denom_passivo_total != 0 else float('inf')
+    comp_capital_de_terceiros = total_passivo/denom_passivo_total if denom_passivo_total != 0 else float('nan')
+    metrics['Composição_do_capital_de_terceiros'] = round(comp_capital_de_terceiros*100,0) if denom_passivo_total != 0 else float('inf')
     metrics['capital_proprio'] = patrimonio_liquido
     metrics['capital_terceiros'] = total_passivo
 
+    # Divida Liquida/EBITDA
     metrics['divida_liquida_sobre_EBITDA'] = round((divida_liquida - caixa_equivalentes) / metrics['EBITDA'],1) if metrics['EBITDA'] != 0 else float('inf')
 
-    metrics['indice_cobertura_juros'] = round(
-        ebit /abs(df_despesas[df_despesas['DS_CONTA'].str.contains('DespesasFinanceiras')]['VL_CONTA'].sum()), 1
-    ) if df_despesas[df_despesas['DS_CONTA'].str.contains('DespesasFinanceiras')]['VL_CONTA'].sum() != 0 else float('inf')
+    # ICJ
+    juros_despesas = df_despesas[df_despesas['DS_CONTA'].str.contains('DespesasFinanceiras')]['VL_CONTA'].sum()
+    metrics['indice_cobertura_juros'] = round(ebit / abs(juros_despesas), 1) if juros_despesas != 0 else float('inf')
 
-    metrics['endividamento'] = round((total_passivo / df_ativos[df_ativos['DS_CONTA'].str.contains('Ativo Total')]['VL_CONTA'].sum())*100, 0)
+    # Endividamento
+    ativo_total_denom = df_ativos[df_ativos['DS_CONTA'].str.contains('Ativo Total')]['VL_CONTA'].sum()
+    metrics['endividamento'] = round((total_passivo / ativo_total_denom)*100, 0) if ativo_total_denom != 0 else float('inf')
 
+    # ROE
     lucro_liquido = df_receitas.loc[df_receitas['DS_CONTA'].str.contains('Lucro/PrejuízoConsolidado do Período', case=False), 'VL_CONTA'].sum()
     metrics['ROE'] = round((lucro_liquido / pl_medio)*100, 0) if pl_medio != 0 else float('inf')
 
+    # Margens
     receita_vendas = df_receitas[df_receitas['DS_CONTA'].str.contains('Receita de Venda de Bens e/ou Serviços', case=False, na=False)]['VL_CONTA'].sum()
     custo_vendas = df_despesas[df_despesas['DS_CONTA'].str.contains('Custo dos Bens e/ou Serviços Vendidos', case=False, na=False)]['VL_CONTA'].sum()
     margem_bruta = (receita_vendas + custo_vendas) / receita_vendas if receita_vendas != 0 else 0
@@ -118,40 +134,47 @@ def calculo(df_ativos, df_passivos, df_receitas, df_despesas,
     metrics['Margem_EBIT'] = round(margem_ebit*100, 0)
     metrics['Margem_liquida'] = round(margem_liquida*100, 0)
 
-    perfil_divida = round((passivos_circulantes/total_passivo)*100,0)
+    # Perfil da Divida
+    perfil_divida = round((passivos_circulantes/total_passivo)*100,0) if total_passivo != 0 else float('inf')
     metrics['Perfil_da_divida']=perfil_divida
 
+    # PMRE
     if custo_vendas != 0:
         pme = (estoque_medio / abs(custo_vendas)) * 365
     else:
         pme = float('inf')
-        metrics['PMRE'] = round(pme, 0)
+    metrics['PMRE'] = round(pme, 0)
 
+    # PMRV
     total_vendas = receita_vendas
     if total_vendas != 0:
-        pmr= (receb_medio/total_vendas)*365
+        pmr = (receb_medio/total_vendas)*365
     else:
-        pme = float('inf')
-        metrics['PMRV'] = round(pmr, 0)
+        pmr = float('inf')
+    metrics['PMRV'] = round(pmr, 0)
 
+    # PMPF
     if estoque_anterior is not None:
         compras = (estoque_atual - estoque_anterior + abs(custo_vendas))
     else:
         compras = abs(custo_vendas)
-        if compras != 0:
-            pmp = abs((passivo_fornecedores_medio/compras)*365)
-        else:
-            pmp = float('inf')
-            metrics['PMPF'] = round(pmp, 0)
+    if compras != 0:
+        pmp = abs((passivo_fornecedores_medio/compras)*365)
+    else:
+        pmp = float('inf')
+    metrics['PMPF'] = round(pmp, 0)
 
-    ciclo_operacional = pme + pmr
-    metrics['Ciclo_Operacional'] = round(ciclo_operacional, 0)
+    # Ciclo Operacional
+    ciclo_operacional = pme + pmr if (pme != float('inf') and pmr != float('inf')) else float('inf')
+    metrics['Ciclo_Operacional'] = round(ciclo_operacional, 0) if ciclo_operacional != float('inf') else float('inf')
 
-    ciclo_de_caixa = ciclo_operacional - pmp
-    metrics['Ciclo_de_Caixa'] = round(ciclo_de_caixa, 0)
+    # Ciclo de Caixa
+    ciclo_de_caixa = ciclo_operacional - pmp if ciclo_operacional != float('inf') and pmp != float('inf') else float('inf')
+    metrics['Ciclo_de_Caixa'] = round(ciclo_de_caixa, 0) if ciclo_de_caixa != float('inf') else float('inf')
     return metrics, pl_atual, estoque_atual, receb_atual, passivo_fornecedores_atual
 
 def analises(year_range): 
+   
     colunas_para_remover = ['CNPJ_CIA', 'VERSAO', 'DENOM_CIA', 'CD_CVM','GRUPO_DFP', 'ESCALA_MOEDA', 'ORDEM_EXERC', 'ST_CONTA_FIXA']
     results = []
     pl_anterior = None
@@ -164,10 +187,8 @@ def analises(year_range):
         df_receitas = carregar_data(ano, 'DRE', 'DFP', 'con', colunas_para_remover)
         df_despesas = carregar_data(ano, 'DRE', 'DFP', 'con', colunas_para_remover)
         df_depreciacao = carregar_data(ano, 'DRE', 'DFP', 'con', colunas_para_remover)
-        metrics, pl_atual, estoque_atual, receb_atual, passivo_fornecedores_atual = calculo(
-            df_ativos, df_passivos, df_receitas, df_despesas, df_depreciacao,
-            pl_anterior, estoque_anterior, receb_anterior, passivo_fornecedores_anterior
-        )
+        metrics, pl_atual, estoque_atual, receb_atual, passivo_fornecedores_atual = calculo(df_ativos, df_passivos, df_receitas, df_despesas, df_depreciacao, pl_anterior,
+        estoque_anterior, receb_anterior, passivo_fornecedores_anterior)
         metrics['Ano'] = ano
         results.append(metrics)
         pl_anterior = pl_atual
@@ -175,6 +196,7 @@ def analises(year_range):
         receb_anterior = receb_atual
         passivo_fornecedores_anterior = passivo_fornecedores_atual
         return pd.DataFrame(results).set_index('Ano')
+    
 
 def DuPont_Tradicional(year_range): 
     Dupont = pd.DataFrame()
@@ -203,19 +225,19 @@ def DuPont_Tradicional(year_range):
         alavancagem = ativo_total_medio / pl_medio if pl_medio else 0
         roe = roa_errado * alavancagem
         DuPont2 = pd.DataFrame({
-            'Ano': [ano],
-            'Margem Líquida DuPont T': [margem_liquida],
-            'Giro do Ativo DuPont T': [giro_do_ativo],
-            'ROA DuPont T': [roa_errado],
-            'Alavancagem DuPont T': [alavancagem],
-            'ROE DuPont T': [roe]
-        })
+                                'Ano': [ano],
+                                'Margem Líquida DuPont T': [margem_liquida],
+                                'Giro do Ativo DuPont T': [giro_do_ativo],
+                                'ROA DuPont T': [roa_errado],
+                                'Alavancagem DuPont T': [alavancagem],
+                                'ROE DuPont T': [roe]
+                                })
         Dupont = pd.concat([Dupont, DuPont2], ignore_index=True)
         ativo_anterior = ativo_atual
         pl_anterior = pl_atual
         Dupont.set_index('Ano', inplace=True)
         return Dupont
-
+    
 def DuPont_Ajustada(year_range): 
     DuPont_Ajustada = pd.DataFrame()
     colunas_para_remover = ['CNPJ_CIA', 'VERSAO', 'DENOM_CIA', 'CD_CVM','GRUPO_DFP', 'ESCALA_MOEDA', 'ORDEM_EXERC', 'ST_CONTA_FIXA']
@@ -225,53 +247,59 @@ def DuPont_Ajustada(year_range):
     for ano in year_range:
         df_passivos = carregar_data(ano, 'BPP', 'DFP', 'con', colunas_para_remover)
         df_receitas = carregar_data(ano, 'DRE', 'DFP', 'con', colunas_para_remover)
+
         lucro_liquido = df_receitas.loc[df_receitas['DS_CONTA'].str.contains('Lucro/Prejuízo Consolidado do Período', case=False), 'VL_CONTA'].sum()
         receita_liquida = df_receitas[df_receitas['DS_CONTA'].str.contains('Receita de Venda de Bens e/ou Serviços', case=False, na=False)]['VL_CONTA'].sum()
         divida_bruta = df_passivos[df_passivos['DS_CONTA'].str.contains('Empréstimos e Financiamentos')]['VL_CONTA'].sum()
         pl_atual = df_passivos[df_passivos['DS_CONTA'].str.contains('Patrimônio Líquido Consolidado')]['VL_CONTA'].sum()
-        if pl_anterior is not None:
-            pl_medio = (pl_anterior + pl_atual) / 2
-        else:
-            pl_medio = pl_atual
+
+        # médias seguras
+        pl_medio = (pl_anterior + pl_atual) / 2 if pl_anterior is not None else pl_atual
         ativo_liquido_atual = pl_atual + divida_bruta
-        if ativo_liquido_anterior is not None:
-            ativo_liquido_medio = (ativo_liquido_anterior + ativo_liquido_atual) / 2
-        else:
-            ativo_liquido_medio = ativo_liquido_atual
+        ativo_liquido_medio = (ativo_liquido_anterior + ativo_liquido_atual) / 2 if ativo_liquido_anterior is not None else ativo_liquido_atual
         if Passivo_financeiro_anterior is not None:
-            Passivo_financeiro_medio = (divida_bruta+Passivo_financeiro_anterior)/2
+            Passivo_financeiro_medio = (divida_bruta + Passivo_financeiro_anterior) / 2
         else:
-            Passivo_financeiro_medio = divida_bruta 
-        despesas_financeiras_liquida = df_receitas[df_receitas['DS_CONTA'].str.contains('Despesas Financeiras')]['VL_CONTA'].sum()*(1-0.34)
+            Passivo_financeiro_medio = divida_bruta
+
+        # despesas financeiras líquidas (trate caso não exista)
+        despesas_financeiras_liquida = df_receitas[df_receitas['DS_CONTA'].str.contains('Despesas Financeiras', case=False)]['VL_CONTA'].sum() * (1 - 0.34)
         lucro_do_ativo = lucro_liquido - despesas_financeiras_liquida
-        margem_liquida_ajustada = (lucro_do_ativo/receita_liquida)*100
-        giro_do_ativo_liquido = receita_liquida/ativo_liquido_medio
-        roic = lucro_do_ativo/ativo_liquido_medio*100
-        KD = abs((despesas_financeiras_liquida/Passivo_financeiro_medio)*100)
-        alavancagem_com_divida = (Passivo_financeiro_medio/pl_medio)*100
-        spread = roic - KD
-        contribuicao_da_alavancagem = spread * alavancagem_com_divida/100
-        roe = roic + contribuicao_da_alavancagem
+
+        # proteções contra divisão por zero
+        margem_liquida_ajustada = (lucro_do_ativo / receita_liquida) * 100 if receita_liquida != 0 else float('nan')
+        giro_do_ativo_liquido = (receita_liquida / ativo_liquido_medio) if ativo_liquido_medio != 0 else float('nan')
+        roic = (lucro_do_ativo / ativo_liquido_medio) * 100 if ativo_liquido_medio != 0 else float('nan')
+        KD = abs((despesas_financeiras_liquida / Passivo_financeiro_medio) * 100) if Passivo_financeiro_medio != 0 else float('nan')
+        alavancagem_com_divida = (Passivo_financeiro_medio / pl_medio) * 100 if pl_medio != 0 else float('nan')
+
+        # restantes
+        spread = roic - KD if (not pd.isna(roic) and not pd.isna(KD)) else float('nan')
+        contribuicao_da_alavancagem = (spread * alavancagem_com_divida / 100) if not pd.isna(spread) and not pd.isna(alavancagem_com_divida) else float('nan')
+        roe = roic + contribuicao_da_alavancagem if not pd.isna(roic) and not pd.isna(contribuicao_da_alavancagem) else float('nan')
         ativo_liquido = pl_atual + divida_bruta
+
         DuPont_Ajust2 = pd.DataFrame({
-            'Ano': [ano],
-            'Lucro do Ativo DuPont A': [lucro_do_ativo],
-            'Ativo Liquido DuPont A': [ativo_liquido],
-            'Margem Liquida Ajustada DuPont A': [margem_liquida_ajustada],
-            'Giro do Ativo Liquido DuPont A': [giro_do_ativo_liquido],
-            'ROIC DuPont A': [roic],
-            'Custo da Dívida DuPont A': [KD],
-            'Spread DuPont A': [spread],
-            'Alavancagem com dívida DuPont A': [alavancagem_com_divida],
-            'Contribuição da Alavancagem DuPont A': [contribuicao_da_alavancagem],
-            'ROE DuPont A': [roe]
-        })
+                                        'Ano': [ano],
+                                        'Lucro do Ativo DuPont A': [lucro_do_ativo],
+                                        'Ativo Liquido DuPont A': [ativo_liquido],
+                                        'Margem Liquida Ajustada DuPont A': [margem_liquida_ajustada],
+                                        'Giro do Ativo Liquido DuPont A': [giro_do_ativo_liquido],
+                                        'ROIC DuPont A': [roic],
+                                        'Custo da Dívida DuPont A': [KD],
+                                        'Spread DuPont A': [spread],
+                                        'Alavancagem com dívida DuPont A': [alavancagem_com_divida],
+                                        'Contribuição da Alavancagem DuPont A': [contribuicao_da_alavancagem],
+                                        'ROE DuPont A': [roe]})
         DuPont_Ajustada = pd.concat([DuPont_Ajustada, DuPont_Ajust2], ignore_index=True)
         pl_anterior = pl_atual
         ativo_liquido_anterior = ativo_liquido_atual
         Passivo_financeiro_anterior = divida_bruta
-        DuPont_Ajustada.set_index('Ano', inplace = True)
-        return DuPont_Ajustada
+    DuPont_Ajustada.set_index('Ano', inplace = True)
+    return DuPont_Ajustada
+    
+
+
 
 def graficos(year_range): 
     financial_data = analises(year_range)
@@ -285,7 +313,8 @@ def graficos(year_range):
         plt.show()
     for column in DuPont_Tradicional.columns:
         plt.figure(figsize=(10, 5))
-        plt.plot(DuPont_Tradicional.index, DuPont_Tradicional[column], marker='o', linestyle='-')
+        plt.plot(DuPont_Tradicional.index, DuPont_Tradicional[column], marker='o',
+        linestyle='-')
         plt.title(column)
         plt.xlabel('Year')
         plt.ylabel(column)
@@ -300,8 +329,10 @@ def graficos(year_range):
         plt.grid(True)
         plt.show()
 
+
+
 # ===========================
-# A PARTIR DAQUI: 20036 -> 017450 (RUMO)
+# A PARTIR DAQUI: SÓ TROCAMOS 20036 -> 017450 (Rumo)
 # ===========================
 BPAs = {} 
 year_range = range(2017, 2024) 
@@ -310,6 +341,7 @@ for year in year_range:
     BPA = relatorio_cias_abertas(year, 'BPA', 'DFP', 'con')
     BPA = BPA.loc[BPA['CD_CVM'] == '017450']   # <<< RUMO
     BPA.drop(columns=['CNPJ_CIA', 'VERSAO', 'DENOM_CIA', 'CD_CVM','GRUPO_DFP', 'ESCALA_MOEDA', 'ORDEM_EXERC', 'ST_CONTA_FIXA'],inplace=True)
+    # converter para numérico primeiro, remover linhas inválidas e só então indexar/ordenar
     BPA['VL_CONTA'] = pd.to_numeric(BPA['VL_CONTA'], errors='coerce')
     BPA = BPA.dropna(subset=['VL_CONTA'])
     BPA['VL_CONTA'] = BPA['VL_CONTA'].round(0)
@@ -326,6 +358,7 @@ for year in year_range:
     'GRUPO_DFP', 'ESCALA_MOEDA', 'ORDEM_EXERC', 'ST_CONTA_FIXA'],
     inplace=True)
 
+    # normalizar e converter VL_CONTA para numérico antes de .round()
     BPP['VL_CONTA'] = BPP['VL_CONTA'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
     BPP['VL_CONTA'] = pd.to_numeric(BPP['VL_CONTA'], errors='coerce')
     BPP = BPP.dropna(subset=['VL_CONTA'])
@@ -337,12 +370,14 @@ for year in year_range:
     BPPs[year] = BPP
     del BPP
 
+
 DFC_MIs = {}
 for year in year_range:
     DFC_MI = relatorio_cias_abertas(year, 'DFC_MI', 'DFP', 'con')
     DFC_MI = DFC_MI.loc[DFC_MI['CD_CVM'] == '017450']   # <<< RUMO
     DFC_MI.drop(columns=['CNPJ_CIA', 'VERSAO', 'DENOM_CIA', 'CD_CVM','GRUPO_DFP', 'ESCALA_MOEDA', 'ORDEM_EXERC', 'ST_CONTA_FIXA'], inplace=True)
 
+    # normalizar strings e converter para numérico antes de round()
     DFC_MI['VL_CONTA'] = DFC_MI['VL_CONTA'].astype(str)\
         .str.replace('.', '', regex=False)\
         .str.replace(',', '.', regex=False)\
@@ -364,6 +399,7 @@ for year in year_range:
     DRE = DRE.loc[DRE['CD_CVM'] == '017450']   # <<< RUMO
     DRE.drop(columns=['CNPJ_CIA', 'VERSAO', 'DENOM_CIA', 'CD_CVM','GRUPO_DFP', 'ESCALA_MOEDA', 'ORDEM_EXERC', 'ST_CONTA_FIXA'], inplace=True)
 
+    # normalizar e converter VL_CONTA
     DRE['VL_CONTA'] = DRE['VL_CONTA'].astype(str)\
         .str.replace('.', '', regex=False)\
         .str.replace(',', '.', regex=False)\
@@ -379,11 +415,10 @@ for year in year_range:
     DREs[year] = DRE
     del DRE
 
+
 DuPont_Tradicional = DuPont_Tradicional(year_range) 
 DuPont_Ajustada = DuPont_Ajustada(year_range)
 Indicadores = analises(year_range) 
 graficos(year_range) 
 del year
 del year_range
-
-
